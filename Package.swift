@@ -10,14 +10,12 @@ let package = Package(
         .executable(name: "MiniMaxBar", targets: ["MiniMaxBar"])
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
+        // Sparkle 已禁用(PR #4 改用 GitHub Releases API),不再需要 SPM 依赖
+        // 否则二进制 link 了 @rpath/Sparkle.framework 但 .app bundle 不带 framework → 启动 crash
     ],
     targets: [
         .executableTarget(
             name: "MiniMaxBar",
-            dependencies: [
-                .product(name: "Sparkle", package: "Sparkle")
-            ],
             path: "Sources/MiniMaxBar"
         )
     ]
