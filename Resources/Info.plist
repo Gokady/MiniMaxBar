@@ -35,19 +35,8 @@
         <key>NSAllowsArbitraryLoads</key>
         <false/>
     </dict>
-    <!-- ─── Sparkle 2 自动更新 ──────────────────────── -->
-    <!-- SUFeedURL:appcast 源 URL(GitHub Releases 或自托管 appcast.xml) -->
-    <key>SUFeedURL</key>
-    <string>https://github.com/wuke/MiniMaxBar/releases/latest</string>
-    <!-- SUPublicEDKey:EdDSA 公钥(base64)。生成方式见 PHASE4_SECURITY.md -->
-    <!-- 生成命令:$(find Sparkle -name generate_keys) -->
-    <key>SUPublicEDKey</key>
-    <string>+dR0UmVFFcXDYjjKqax2Cp7JzrmUyhqa5UqxPb7+4pg=</string>
-    <!-- 启动时自动检查更新(默认开,跟 UpdateManager.automaticallyChecksForUpdates 一致) -->
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <!-- 自动检查周期(秒),默认 86400 = 1 天 -->
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
+    <!-- ─── Phase 3:Sparkle 自动更新(暂未启用)────────── -->
+    <!-- 当前不做 Sparkle,改用 UpdateManager 调 GitHub Releases API 检查更新 -->
+    <!-- 启用 Sparkle 时需重新加:SUFeedURL / SUPublicEDKey / SUEnableAutomaticChecks / SUScheduledCheckInterval -->
 </dict>
 </plist>
