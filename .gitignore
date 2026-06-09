@@ -3,6 +3,8 @@
 .build-verify/
 .swiftpm/
 dist/
+build/                # xcodebuild 默认输出
+DerivedData/         # Xcode 派生数据
 
 # macOS junk
 .DS_Store
@@ -14,9 +16,50 @@ dist/
 xcuserdata/
 *.xcuserstate
 
-# Sparkle private keys(绝不能提交)
+# Apple 证书 + Provisioning(绝不能提交)
+*.p12
+*.mobileprovision
+
+# Sparkle 私钥(绝不能提交)
 dsa_priv.pem
+sparkle_private_key*
 *.pem
 
-# Sparkle
+# Sparkle dSYM
 *.dSYM/
+
+# 环境变量 / secrets
+.env
+
+# Security / secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.mobileprovision
+dsa_priv.pem
+sparkle_private_key*
+Secrets/
+Config/private/
+
+# Local build/cache
+.DS_Store
+DerivedData/
+.build/
+build/
+dist/
+logs/
+cache/
+
+# Database / local state
+*.sqlite
+*.sqlite3
+*.db
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+
+# Claude / local agent
+.claude/

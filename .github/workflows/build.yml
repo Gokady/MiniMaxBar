@@ -1,0 +1,91 @@
+name: CI Build
+
+# ─── Layer 1:CI 编译验证 ─────────────────────────────
+# 任何 push 到 main、PR 进来 → 跑一遍编译
+# 编译挂了立刻 fail,PR 不会合进去
+# 不签名(用 CODE_SIGNING_ALLOWED=NO),等正式签名流程接好再上
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (SwiftPM)
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    env:
+      # 临时禁掉签名,让 CI 只验证编译能过
+      CODE_SIGNING_ALLOWED: NO
+      CODE_SIGN_IDENTITY: ""
+      CODE_SIGNING_REQUIRED: NO
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          echo "=== macOS ==="
+          sw_vers
+          echo ""
+          echo "=== Xcode ==="
+          xcode-select -p
+          xcodebuild -version
+          echo ""
+          echo "=== Swift ==="
+          swift --version
+
+      - name: Resolve SPM dependencies
+        run: |
+          swift package resolve 2>&1 | tee resolve.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "❌ swift package resolve 失败"
+            tail -30 resolve.log
+            exit 1
+          fi
+          echo "✅ SPM 依赖解析成功"
+
+      - name: Build (Release)
+        run: |
+          set -o pipefail
+          swift build -c release 2>&1 | tee build.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo ""
+            echo "❌ 编译失败,以下是最后 50 行日志:"
+            echo "─────────────────────────────────────"
+            tail -50 build.log
+            echo "─────────────────────────────────────"
+            exit 1
+          fi
+          echo ""
+          echo "✅ 编译成功"
+          ls -la .build/release/MiniMaxBar
+          file .build/release/MiniMaxBar
+
+      - name: Build (Debug, 快速回归)
+        run: |
+          set -o pipefail
+          swift build -c debug 2>&1 | tee build-debug.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "❌ Debug 编译也失败了"
+            tail -30 build-debug.log
+            exit 1
+          fi
+          echo "✅ Debug 编译成功"
+
+      - name: 上传编译产物(供下载验证)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMaxBar-binary-${{ github.sha }}
+          path: .build/release/MiniMaxBar
+          if-no-files-found: error
+          retention-days: 7
