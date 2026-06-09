@@ -19,9 +19,15 @@ enum AppInfo {
     static let githubOwner: String = "Gokady"
     static let githubRepo: String = "MiniMaxBar"
 
-    /// Sparkle appcast feed URL(后续接 Sparkle 时用,现在没启用)
-    static let feedURL: URL = URL(string:
-        "https://github.com/\(githubOwner)/\(githubRepo)/releases/latest"
+    /// GitHub Releases 页面 URL(用户手动去下载新版用)
+    static let releasesPageURL: URL = URL(string:
+        "https://github.com/\(githubOwner)/\(githubRepo)/releases"
+    )!
+
+    /// GitHub Releases API:获取最新 release 的元信息
+    /// (无 appcast.xml,不签 Sparkle 私钥 —— Phase 3 之前用这个 MVP)
+    static let latestReleaseAPIURL: URL = URL(string:
+        "https://api.github.com/repos/\(githubOwner)/\(githubRepo)/releases/latest"
     )!
 
     /// 用户可见的"当前版本"显示文案
