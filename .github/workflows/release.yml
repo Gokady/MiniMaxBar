@@ -1,5 +1,9 @@
 name: Manual Release
 
+# workflow_dispatch 默认 GITHUB_TOKEN 只读,需要 write 才能 gh release create
+permissions:
+  contents: write
+
 # ─── Layer 2:手动发版 → GitHub Releases MVP ──────────────
 #
 # 在 GitHub Actions 页面点 "Run workflow" → 输版本号 → 自动:
