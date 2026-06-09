@@ -1,0 +1,108 @@
+name: Release
+
+# 触发条件:推送 v*.*.* tag 时
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, Sign (ad-hoc), Package, Release
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    env:
+      APP_NAME: MiniMaxBar
+
+    steps:
+      # ─── 1. 拉代码 ────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─── 2. 写 Sparkle 私钥(给 generate_appcast 签名用) ───
+      - name: Write Sparkle private key
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.config/sparkle
+          echo "$SPARKLE_PRIVATE_KEY" > ~/.config/sparkle/dsa_priv.pem
+          chmod 600 ~/.config/sparkle/dsa_priv.pem
+
+      # ─── 3. 校验 tag 和 AppInfo.version 一致 ──────────
+      - name: Verify version consistency
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          APP_VERSION=$(grep -A1 'static let version:' Sources/MiniMaxBar/AppInfo.swift | grep '"' | tr -d '"' | tr -d ' ')
+          echo "Tag:     v$TAG"
+          echo "AppInfo: $APP_VERSION"
+          if [ "$TAG" != "$APP_VERSION" ]; then
+            echo "❌ Tag 和 AppInfo.version 不一致 — 先 bump AppInfo 再打 tag"
+            exit 1
+          fi
+          echo "✅ 版本一致"
+
+      # ─── 4. 编译 ──────────────────────────────────────────
+      - name: Build (Release)
+        run: ./build.sh
+
+      # ─── 5. ad-hoc 签名(本地个人使用足够) ──────────────
+      # Apple Developer / Notarization 跳过了,Gatekeeper 会弹警告
+      # 但 Sparkle 自动更新本身不依赖签名,EdDSA 验签保护 .zip 就够
+      - name: Ad-hoc codesign
+        run: |
+          codesign --force --deep --sign - dist/MiniMaxBar.app
+          codesign --verify dist/MiniMaxBar.app
+          echo "✅ Ad-hoc 签名完成(Gatekeeper 会弹警告,右键打开即可)"
+
+      # ─── 6. 打 zip(给用户下载) ─────────────────────────
+      - name: Zip for distribution
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/MiniMaxBar.app MiniMaxBar.zip
+          ls -la MiniMaxBar.zip
+
+      # ─── 7. 生成 appcast.xml ───────────────────────────
+      - name: Generate appcast
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          # 从 .build 里找 generate_appcast
+          GENERATE_APPCAST=$(find .build/checkouts/Sparkle -name "generate_appcast" -type f | head -1)
+          echo "generate_appcast: $GENERATE_APPCAST"
+
+          "$GENERATE_APPCAST" \
+            --ed-key-file ~/.config/sparkle/dsa_priv.pem \
+            --download-url-prefix "https://github.com/${{ github.repository }}/releases/download/v$TAG/" \
+            . 2>&1
+          ls -la appcast.xml
+
+      # ─── 8. 发 GitHub Release ──────────────────────────
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+
+          # 从 CHANGELOG.md 抽对应版本段
+          NOTES=$(awk "/## \[${TAG}\]/,/^## \[/{if (/^## \[/ && !/## \[${TAG}\]/) exit; print}" CHANGELOG.md \
+                 | head -n -2 2>/dev/null || echo "Release v$TAG")
+
+          gh release create "v$TAG" \
+            MiniMaxBar.zip \
+            appcast.xml \
+            --title "v$TAG" \
+            --notes "${NOTES:-Release v$TAG}" \
+            --verify
+
+          echo ""
+          echo "🎉 Release v$TAG 已发布!"
+          echo "👉 https://github.com/${{ github.repository }}/releases/tag/v$TAG"
+
+      # ─── 9. 清理私钥 ──────────────────────────────────
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.config/sparkle/dsa_priv.pem

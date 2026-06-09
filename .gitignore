@@ -1,0 +1,22 @@
+# Build artifacts
+.build/
+.build-verify/
+.swiftpm/
+dist/
+
+# macOS junk
+.DS_Store
+*.swp
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+
+# Sparkle private keys(绝不能提交)
+dsa_priv.pem
+*.pem
+
+# Sparkle
+*.dSYM/
