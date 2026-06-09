@@ -89,21 +89,68 @@ jobs:
       - name: 编译 .app bundle
         env:
           VERSION: ${{ inputs.version }}
+        # 不用 ./build.sh:它写死找 Xcode 自带 Swift 6.1,装不上 setup-swift 的 6.2
+        # 这里 inline 编译 + bundle 装配,用 setup-swift 装的 swift
         run: |
           set -o pipefail
-          chmod +x build.sh
-          ./build.sh 2>&1 | tee build.log
+
+          # setup-swift@v2 装的 swift 路径
+          # macOS 上 setup-swift 会装到 ~/Library/Developer/Toolchains/swift-X.Y.Z.xctoolchain/
+          SWIFT_BIN=$(find "$HOME/Library/Developer/Toolchains" -name "swift" -path "*/usr/bin/swift" 2>/dev/null | head -1)
+          if [ -z "$SWIFT_BIN" ]; then
+            SWIFT_BIN="$TOOLCHAINS/swift/usr/bin/swift"
+          fi
+          if [ ! -x "$SWIFT_BIN" ]; then
+            echo "❌ 找不到 setup-swift 装的 swift 路径"
+            echo "  TOOLCHAINS=$TOOLCHAINS"
+            echo "  HOME=$HOME"
+            ls -la ~/Library/Developer/Toolchains/ 2>&1 || true
+            exit 1
+          fi
+          echo "Using Swift: $SWIFT_BIN"
+          "$SWIFT_BIN" --version
+
+          # 编译
+          "$SWIFT_BIN" build -c release 2>&1 | tee build.log
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "❌ build.sh 失败,最后 50 行:"
-            echo "─────────────────────────────────────"
+            echo "❌ 编译失败,最后 50 行:"
             tail -50 build.log
-            echo "─────────────────────────────────────"
             exit 1
           fi
 
-          echo "✅ .app bundle 编译完成"
-          ls -la dist/MiniMaxBar.app/
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/MiniMaxBar.app/Contents/Info.plist
+          # 拼 .app bundle(等价 build.sh 后半段)
+          BIN=".build/release/MiniMaxBar"
+          APP="dist/MiniMaxBar.app"
+          rm -rf dist
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "$BIN" "$APP/Contents/MacOS/MiniMaxBar"
+          cp Resources/Info.plist "$APP/Contents/Info.plist"
+
+          # 图标
+          if [ -f "Icons/AppIcon.icns" ]; then
+            cp "Icons/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+            echo "  ✓ AppIcon.icns"
+          fi
+          for png in "icon_22.png" "icon_22@2x.png" "icon_22@3x.png"; do
+            if [ -f "Icons/statusbar/$png" ]; then
+              cp "Icons/statusbar/$png" "$APP/Contents/Resources/$png"
+            fi
+          done
+          for png in "icon_22.png" "icon_22@2x.png" "icon_22@3x.png"; do
+            if [ -f "Icons/statusbar/color/$png" ]; then
+              mkdir -p "$APP/Contents/Resources/color"
+              cp "Icons/statusbar/color/$png" "$APP/Contents/Resources/color/$png"
+            fi
+          done
+
+          # ad-hoc 签名
+          codesign --force --deep --sign - "$APP" 2>/dev/null || true
+          # 清 quarantine
+          xattr -cr "$APP" 2>/dev/null || true
+
+          echo "✅ .app bundle 完成"
+          ls -la "$APP/"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
 
       - name: 打 zip(保留扩展属性)
         env:
