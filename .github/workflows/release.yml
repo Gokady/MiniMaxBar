@@ -271,8 +271,7 @@ jobs:
           gh release create "v${VERSION}" \
             "${ASSETS[@]}" \
             --title "v${VERSION}" \
-            --notes "${{ steps.notes.outputs.notes }}" \
-            --verify
+            --notes "${{ steps.notes.outputs.notes }}"
 
           echo ""
           echo "🎉 Release v${VERSION} 已发布"
