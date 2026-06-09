@@ -1,20 +1,25 @@
 import Foundation
 
-/// 应用元信息(版本号、GitHub 仓库等),单一来源
-/// build.sh 会从 git tag / 手动参数注入 version,这里给个合理默认值
+/// 应用元信息(版本号、GitHub 仓库等)
+/// 版本号单一来源 = Resources/Info.plist 的 CFBundleShortVersionString / CFBundleVersion
+/// CI(在 release.yml)写入 Info.plist,运行时从这里读
 enum AppInfo {
-    /// 用户可见的版本号(如 "0.4.0")
-    static let version: String = "0.3.0"
+    /// 用户可见的版本号(如 "0.4.0"),运行时从 Info.plist 读
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    }
 
-    /// 构建号(递增整数,App Store 用;Sparkle 不强制)
-    static let build: Int = 1
+    /// 构建号,运行时从 Info.plist 读
+    static var build: Int {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return Int(raw ?? "1") ?? 1
+    }
 
-    /// GitHub 仓库坐标(Sparkle 检查 release 用)
+    /// GitHub 仓库坐标
     static let githubOwner: String = "Gokady"
     static let githubRepo: String = "MiniMaxBar"
 
-    /// Sparkle appcast feed URL(GitHub Releases latest 即可,Sparkle 2 支持)
-    /// 也可以指向自己 host 的 appcast.xml(用 Sparkle 的 generate_appcast 工具生成)
+    /// Sparkle appcast feed URL(后续接 Sparkle 时用,现在没启用)
     static let feedURL: URL = URL(string:
         "https://github.com/\(githubOwner)/\(githubRepo)/releases/latest"
     )!
