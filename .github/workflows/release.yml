@@ -1,15 +1,17 @@
 name: Manual Release
 
-# ─── Layer 2:手动发版 ─────────────────────────────
+# ─── Layer 2:手动发版 → GitHub Releases MVP ──────────────
+#
 # 在 GitHub Actions 页面点 "Run workflow" → 输版本号 → 自动:
-#   1. 校验版本号格式
-#   2. 改 Resources/Info.plist 的 CFBundleShortVersionString + CFBundleVersion
-#   3. 跑 ./build.sh 编译 + 拼 .app
-#   4. 打 zip
-#   5. 读 CHANGELOG.md 对应版本段当 release body(没匹配就用输入的 notes)
-#   6. 创建 GitHub Release + 上传 zip
+#   1. 校验版本号 + 改 Info.plist
+#   2. 编译 .app(用 setup-swift 装的 6.2,绕开 build.sh)
+#   3. 打 MiniMaxBar.zip + MiniMaxBar.dmg
+#   4. 严格验证产物(zip 顶层结构 + 版本号 + 可执行文件)
+#   5. 创建 GitHub Release,上传两个资产
+#   6. 产物也作为 workflow artifact 留 30 天
+#
+# 暂不接:Sparkle / Apple Developer / Notarization
 
-# 显式只开 workflow_dispatch(手动触发),其他触发都注释掉
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +36,7 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # 本地 build.sh 用 ad-hoc 签名,CI 也走同样路径
+      # ad-hoc 签名:用户首次打开需要右键 → 打开
       CODE_SIGNING_ALLOWED: NO
       CODE_SIGN_IDENTITY: ""
       CODE_SIGNING_REQUIRED: NO
@@ -59,8 +61,8 @@ jobs:
             echo "❌ 版本号格式错: $VERSION(需要 X.Y.Z,如 0.4.0)"
             exit 1
           fi
-          echo "✅ 版本号: v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ 版本号: v$VERSION"
 
       - name: 写 Info.plist
         env:
@@ -69,50 +71,160 @@ jobs:
           VERSION="${VERSION}"
           PLIST="Resources/Info.plist"
 
-          # 算 build 号:用当前 commit 数量,保证每次发版递增
           BUILD_NUM=$(git rev-list --count HEAD)
           echo "Build 号: $BUILD_NUM"
 
-          # 改 CFBundleShortVersionString
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$PLIST"
-
-          # 同时写 MARKETING_VERSION(给 Xcode build 设置用,有些工具读这个)
           /usr/libexec/PlistBuddy -c "Add :MARKETING_VERSION string $VERSION" "$PLIST" 2>/dev/null \
             || /usr/libexec/PlistBuddy -c "Set :MARKETING_VERSION $VERSION" "$PLIST"
 
-          echo "✅ Info.plist 更新完:"
+          echo "✅ Info.plist:"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :MARKETING_VERSION" "$PLIST"
 
-      - name: 编译 .app bundle
+      - name: 编译 .app bundle(inline,绕开 build.sh 的 Xcode 6.1 硬编码)
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -o pipefail
-          chmod +x build.sh
-          ./build.sh 2>&1 | tee build.log
+
+          # setup-swift@v2 装的 swift 路径(macOS 上 ~/Library/Developer/Toolchains/swift-X.Y.Z.xctoolchain)
+          SWIFT_BIN=$(find "$HOME/Library/Developer/Toolchains" -name "swift" -path "*/usr/bin/swift" 2>/dev/null | head -1)
+          if [ -z "$SWIFT_BIN" ]; then
+            SWIFT_BIN="$TOOLCHAINS/swift/usr/bin/swift"
+          fi
+          if [ ! -x "$SWIFT_BIN" ]; then
+            echo "❌ 找不到 setup-swift 装的 swift 路径"
+            echo "  TOOLCHAINS=$TOOLCHAINS"
+            echo "  HOME=$HOME"
+            ls -la ~/Library/Developer/Toolchains/ 2>&1 || true
+            exit 1
+          fi
+          echo "Using Swift: $SWIFT_BIN"
+          "$SWIFT_BIN" --version
+
+          # 编译
+          "$SWIFT_BIN" build -c release 2>&1 | tee build.log
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "❌ build.sh 失败,最后 50 行:"
-            echo "─────────────────────────────────────"
+            echo "❌ 编译失败,最后 50 行:"
             tail -50 build.log
-            echo "─────────────────────────────────────"
             exit 1
           fi
 
-          echo "✅ .app bundle 编译完成"
-          ls -la dist/MiniMaxBar.app/
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/MiniMaxBar.app/Contents/Info.plist
+          # 拼 .app bundle(等价 build.sh 后半段)
+          BIN=".build/release/MiniMaxBar"
+          APP="dist/MiniMaxBar.app"
+          rm -rf dist
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "$BIN" "$APP/Contents/MacOS/MiniMaxBar"
+          cp Resources/Info.plist "$APP/Contents/Info.plist"
 
-      - name: 打 zip(保留扩展属性)
+          if [ -f "Icons/AppIcon.icns" ]; then
+            cp "Icons/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+            echo "  ✓ AppIcon.icns"
+          fi
+          for png in "icon_22.png" "icon_22@2x.png" "icon_22@3x.png"; do
+            if [ -f "Icons/statusbar/$png" ]; then
+              cp "Icons/statusbar/$png" "$APP/Contents/Resources/$png"
+            fi
+          done
+          for png in "icon_22.png" "icon_22@2x.png" "icon_22@3x.png"; do
+            if [ -f "Icons/statusbar/color/$png" ]; then
+              mkdir -p "$APP/Contents/Resources/color"
+              cp "Icons/statusbar/color/$png" "$APP/Contents/Resources/color/$png"
+            fi
+          done
+
+          # ad-hoc 签名(用户首次打开 macOS 会弹警告,右键 → 打开 即可)
+          codesign --force --deep --sign - "$APP" 2>/dev/null || true
+          xattr -cr "$APP" 2>/dev/null || true
+
+          echo "✅ .app bundle 完成"
+          ls -la "$APP/"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+
+      - name: 打 MiniMaxBar.zip(顶层 MiniMaxBar.app/)
         env:
           VERSION: ${{ inputs.version }}
         run: |
+          set -e
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent MiniMaxBar.app "MiniMaxBar-v${VERSION}.zip"
-          ls -la "MiniMaxBar-v${VERSION}.zip"
-          cd ..
+
+          # ditto --keepParent 让 MiniMaxBar.app 作为 zip 顶层目录
+          ditto -c -k --sequesterRsrc --keepParent MiniMaxBar.app MiniMaxBar.zip
+          ls -la MiniMaxBar.zip
+
+          # ─── 严格验证 zip 结构(用户要求)───
+          echo ""
+          echo "───────── zip 结构验证 ─────────"
+          rm -rf /tmp/zip-extract
+          mkdir -p /tmp/zip-extract
+          unzip -q MiniMaxBar.zip -d /tmp/zip-extract
+
+          APP="/tmp/zip-extract/MiniMaxBar.app"
+          ERRORS=0
+
+          if [ ! -d "$APP" ]; then
+            echo "❌ 顶层不是 MiniMaxBar.app/(实际是 $(ls /tmp/zip-extract | head -3 | tr '\n' ' '))"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ ! -f "$APP/Contents/Info.plist" ]; then
+            echo "❌ MiniMaxBar.app/Contents/Info.plist 缺失"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ ! -f "$APP/Contents/MacOS/MiniMaxBar" ]; then
+            echo "❌ MiniMaxBar.app/Contents/MacOS/MiniMaxBar 缺失"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ -f "$APP/Contents/Info.plist" ]; then
+            APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+            if [ "$APP_VERSION" != "$VERSION" ]; then
+              echo "❌ 版本号不匹配:zip 里是 $APP_VERSION,输入是 $VERSION"
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "✅ CFBundleShortVersionString: $APP_VERSION(匹配)"
+            fi
+          fi
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "❌ zip 验证失败,$ERRORS 项错"
+            exit 1
+          fi
+          echo "✅ zip 验证通过:顶层 MiniMaxBar.app/ + Info.plist + 可执行 + 版本号都对"
+
+      - name: 打 MiniMaxBar.dmg(拖拽安装包,ad-hoc)
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+
+          STAGING="dist/dmg-staging"
+          rm -rf "$STAGING" dist/MiniMaxBar.dmg
+          mkdir -p "$STAGING"
+
+          # 拷 .app
+          cp -R dist/MiniMaxBar.app "$STAGING/"
+
+          # 加 Applications 软链接(标准拖拽安装)
+          ln -s /Applications "$STAGING/Applications"
+
+          # 创建只读压缩 DMG(UDZO)
+          echo "───────── 创建 DMG ─────────"
+          ls -la "$STAGING/"
+          hdiutil create -volname "MiniMaxBar" \
+                          -srcfolder "$STAGING" \
+                          -ov -format UDZO \
+                          "dist/MiniMaxBar.dmg"
+
+          # 验证 DMG
+          hdiutil verify dist/MiniMaxBar.dmg
+          ls -la dist/MiniMaxBar.dmg
+          echo "✅ DMG 已生成:$(du -h dist/MiniMaxBar.dmg | cut -f1)"
 
       - name: 读 release notes
         id: notes
@@ -122,12 +234,10 @@ jobs:
         run: |
           VERSION="${VERSION}"
 
-          # 优先级:1) workflow 输入 > 2) CHANGELOG.md 对应段 > 3) 默认说明
           if [ -n "${INPUT_NOTES}" ]; then
             NOTES="${INPUT_NOTES}"
             echo "📝 用 workflow 输入的 notes"
           elif [ -f CHANGELOG.md ] && grep -q "## \[${VERSION}\]" CHANGELOG.md; then
-            # 从 CHANGELOG.md 抽 ## [0.4.0] 到下一个 ## [ 之间的内容
             NOTES=$(awk -v ver="## \[${VERSION}\]" '
               $0 ~ ver { in_section=1; print; next }
               in_section && /^## \[/ { exit }
@@ -146,21 +256,29 @@ jobs:
           echo "───────── notes preview ─────────"
           echo "$NOTES" | head -20
 
-      - name: 创建 GitHub Release
+      - name: 创建 GitHub Release(zip + dmg)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
         run: |
           VERSION="${VERSION}"
-          ZIP="dist/MiniMaxBar-v${VERSION}.zip"
+          ZIP="dist/MiniMaxBar.zip"
+          DMG="dist/MiniMaxBar.dmg"
 
-          if [ ! -f "$ZIP" ]; then
-            echo "❌ 找不到 $ZIP"
+          ASSETS=()
+          [ -f "$ZIP" ] && ASSETS+=("$ZIP")
+          [ -f "$DMG" ] && ASSETS+=("$DMG")
+
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "❌ 没产物可上传"
             exit 1
           fi
 
+          echo "📦 准备上传 ${#ASSETS[@]} 个资产:"
+          printf '  - %s\n' "${ASSETS[@]}"
+
           gh release create "v${VERSION}" \
-            "$ZIP" \
+            "${ASSETS[@]}" \
             --title "v${VERSION}" \
             --notes "${{ steps.notes.outputs.notes }}" \
             --verify
@@ -168,11 +286,17 @@ jobs:
           echo ""
           echo "🎉 Release v${VERSION} 已发布"
           echo "👉 https://github.com/${{ github.repository }}/releases/tag/v${VERSION}"
+          echo ""
+          echo "💡 用户下载提示:"
+          echo "  - 首次打开 macOS 会弹'未识别的开发者',右键 → 打开 即可"
+          echo "  - 拖拽 MiniMaxBar.app 到 /Applications 完成安装"
 
-      - name: 上传 .app 给用户下载
+      - name: 上传产物(作为 workflow artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: MiniMaxBar-v${{ inputs.version }}-app
-          path: dist/MiniMaxBar-v${{ inputs.version }}.zip
+          name: MiniMaxBar-v${{ inputs.version }}-build
+          path: |
+            dist/MiniMaxBar.zip
+            dist/MiniMaxBar.dmg
           if-no-files-found: error
           retention-days: 30
