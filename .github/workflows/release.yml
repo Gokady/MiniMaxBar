@@ -4,21 +4,23 @@ name: Manual Release
 permissions:
   contents: write
 
-# ─── 手动发版 → GitHub Releases + Sparkle ────────────────
+# ─── 发版 → GitHub Releases + Sparkle ───────────────────
 #
-# 在 GitHub Actions 页面点 "Run workflow" → 输版本号 → 自动:
+# 推送 v* tag 或在 GitHub Actions 页面点 "Run workflow" → 输版本号 → 自动:
 #   1. 校验版本号 + 改 Info.plist
 #   2. 编译 .app + 嵌入 Sparkle.framework
 #   3. 打 MiniMaxBar.zip
 #   4. 严格验证产物(zip 顶层结构 + 版本号 + 可执行文件)
-#   5. EdDSA 签名 zip → 生成签名
-#   6. generate_appcast 生成 appcast.xml
-#   7. 创建 GitHub Release,上传 zip + appcast.xml
+#   5. 如果配置了 SPARKLE_PRIVATE_KEY,生成 appcast.xml
+#   6. 创建 GitHub Release,上传 zip + dmg (+ appcast.xml)
 #
-# 前置条件:
-#   - GitHub Secret: SPARKLE_PRIVATE_KEY (EdDSA 私钥,由 generate_keys 生成)
+# 可选 Secret:
+#   - SPARKLE_PRIVATE_KEY (EdDSA 私钥,由 generate_keys 生成)
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
@@ -32,7 +34,7 @@ on:
         default: ''
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false   # 发版严肃,别中途取消
 
 jobs:
@@ -73,9 +75,13 @@ jobs:
       - name: 校验输入
         id: validate
         env:
-          VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          VERSION="${VERSION}"
+          VERSION="${INPUT_VERSION}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${REF_NAME#v}"
+          fi
           # X.Y.Z 格式校验
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "❌ 版本号格式错: $VERSION(需要 X.Y.Z,如 0.5.0)"
@@ -85,19 +91,21 @@ jobs:
           echo "✅ 版本号: v$VERSION"
 
       - name: 检查 SPARKLE_PRIVATE_KEY
+        id: sparkle_key
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           if [ -z "${SPARKLE_PRIVATE_KEY}" ]; then
-            echo "❌ SPARKLE_PRIVATE_KEY 未配置,无法发布 Sparkle 更新"
-            exit 1
+            echo "⚠ SPARKLE_PRIVATE_KEY 未配置,将只发布 zip/dmg,跳过 Sparkle appcast"
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
           else
             echo "✅ SPARKLE_PRIVATE_KEY 已配置"
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 写 Info.plist
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
         run: |
           VERSION="${VERSION}"
           PLIST="Resources/Info.plist"
@@ -117,7 +125,7 @@ jobs:
 
       - name: 编译 .app bundle
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
         run: |
           set -o pipefail
 
@@ -185,7 +193,7 @@ jobs:
 
       - name: 打 MiniMaxBar.zip
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
         run: |
           set -e
           cd dist
@@ -246,9 +254,10 @@ jobs:
           echo "✅ zip 验证通过"
 
       - name: EdDSA 签名 + appcast 生成
+        if: steps.sparkle_key.outputs.has_key == 'true'
         id: sparkle
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -291,7 +300,7 @@ jobs:
 
       - name: 打 MiniMaxBar.dmg
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
         run: |
           set -e
 
@@ -316,8 +325,8 @@ jobs:
       - name: 读 release notes
         id: notes
         env:
-          VERSION: ${{ inputs.version }}
-          INPUT_NOTES: ${{ inputs.release_notes }}
+          VERSION: ${{ steps.validate.outputs.version }}
+          INPUT_NOTES: ${{ github.event.inputs.release_notes }}
         run: |
           VERSION="${VERSION}"
 
@@ -346,7 +355,7 @@ jobs:
       - name: 创建 GitHub Release(zip + appcast.xml + dmg)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
         run: |
           VERSION="${VERSION}"
           ZIP="dist/MiniMaxBar.zip"
@@ -383,10 +392,10 @@ jobs:
       - name: 上传产物(作为 workflow artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: MiniMaxBar-v${{ inputs.version }}-build
+          name: MiniMaxBar-v${{ steps.validate.outputs.version }}-build
           path: |
             dist/MiniMaxBar.zip
             dist/MiniMaxBar.dmg
             dist/appcast.xml
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
