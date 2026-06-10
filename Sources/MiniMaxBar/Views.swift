@@ -1170,7 +1170,7 @@ struct PanelForm: View {
                     )) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(model.displayName)
-                            Text("model: \(model.modelName) · \(model.statusText(model.currentWeeklyStatus))")
+                            Text("model: \(model.modelName) · 5h:\(model.statusText(model.currentIntervalStatus)) · 周:\(model.statusText(model.currentWeeklyStatus))")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }

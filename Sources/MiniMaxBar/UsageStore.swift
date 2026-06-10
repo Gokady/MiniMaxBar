@@ -334,18 +334,18 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// 全部可见模型的 5h 是否都无限(status != 1)
+    /// 全部可见模型的 5h 是否都无限(只有 status==3 才算真无限)
     private var all5hUnlimited: Bool {
-        !models.isEmpty && models.allSatisfy { $0.currentIntervalStatus != 1 }
+        !models.isEmpty && models.allSatisfy { $0.currentIntervalStatus == 3 }
     }
 
-    /// 全部可见模型的周是否都无限
+    /// 全部可见模型的周是否都无限(只有 status==3 才算真无限)
     private var allWeeklyUnlimited: Bool {
-        !models.isEmpty && models.allSatisfy { $0.currentWeeklyStatus != 1 }
+        !models.isEmpty && models.allSatisfy { $0.currentWeeklyStatus == 3 }
     }
 
     /// 状态栏文字(图标后面直接显示,由 statusBarFormat 控制)
-    /// ⚠ 只有 status != 1 才算真无限,percent==100 ≠ 无限(可能是"满"而已)
+    /// ⚠ 只有 status==3 才算真无限,percent==100 ≠ 无限(可能是"满"而已)
     var statusBarText: String {
         guard apiKeyConfigured, !models.isEmpty else { return "" }
         let min5h   = models.map { $0.currentIntervalRemainingPercent }.min() ?? 100
@@ -396,17 +396,25 @@ final class UsageStore: ObservableObject {
     /// - Parameters:
     ///   - model: 模型
     ///   - isWeekly: true=周窗口, false=5h 窗口
+    /// - 状态码语义(从 API 实际响应推断):
+    ///   - 0 = 未启用(无窗口,不算无限,按 0% 显示)
+    ///   - 1 = 正常受限(有限额度) ← API 明确说有限,必须尊重
+    ///   - 2 = 受限/触顶(有限,只是这次用完)
+    ///   - 3 = 无配额(真正的无限)
     func isUnlimited(_ model: ModelUsage, isWeekly: Bool) -> Bool {
         if isWeekly {
-            // 用户手动覆盖
+            // 优先级:用户手动覆盖 > API 状态码 > 学习结果
             if let ovr = weeklyDisplayOverride { return ovr }
-            // 学到的 + API 直接说无限(status != 1)
-            if unlimitedLearnedModels.contains(model.modelName) { return true }
-            if model.currentWeeklyStatus != 1 { return true }
-            return false
+            // API 明确说受限(status==1)或已用尽(status==2)→一定不是无限
+            if model.currentWeeklyStatus == 1 || model.currentWeeklyStatus == 2 {
+                return false
+            }
+            // API 说无限(status==3)→是无限
+            if model.currentWeeklyStatus == 3 { return true }
+            // 其他情况(status==0 未启用等):参考学习结果
+            return unlimitedLearnedModels.contains(model.modelName)
         } else {
-            // 5h 窗口只信任 API status
-            return model.currentIntervalStatus != 1
+            return model.currentIntervalStatus == 3
         }
     }
 
@@ -427,24 +435,33 @@ final class UsageStore: ObservableObject {
         hiddenModels.contains(name)
     }
 
-    /// 学习无限周额度模式:5h 任何使用(剩余 < 100)+ 周 100% → 记为周无限
-    /// 敏感度:5h 一掉(就触发),不必等到 60-90
+    /// 学习无限周额度模式
+    /// 条件:5h 有真实限制(status==1) + 5h 已用(剩余 < 100) + 周 100%
+    ///       + 周状态码不是明确受限(status != 1)
     /// 例外:用户手动覆盖(weeklyDisplayOverride != nil)时不学习
+    /// 反学习:如果 API 明确说周受限(status==1),从学习列表中移除
     func learnUnlimited() {
-        // 用户已手动覆盖,不再学习
         guard weeklyDisplayOverride == nil else { return }
 
         var changed = false
         for model in models {
             let fiveHour = model.currentIntervalRemainingPercent
             let weekly = model.currentWeeklyRemainingPercent
-            // 模式:5h 有真实限制 + 5h 已用(剩余 < 100) + 周纹丝不动 100%
             let fiveHourHasLimit = model.currentIntervalStatus == 1
             let fiveHourHasUsage = fiveHour < 100
             let weeklyUnchanged = weekly == 100
-            if fiveHourHasLimit && fiveHourHasUsage && weeklyUnchanged {
+            let weeklyNotExplicitlyLimited = model.currentWeeklyStatus != 1
+
+            if fiveHourHasLimit && fiveHourHasUsage && weeklyUnchanged && weeklyNotExplicitlyLimited {
+                // 符合学习条件:5h 有真实使用 + 周没动 + 周没被 API 标为受限
                 if !unlimitedLearnedModels.contains(model.modelName) {
                     unlimitedLearnedModels.insert(model.modelName)
+                    changed = true
+                }
+            } else if model.currentWeeklyStatus == 1 {
+                // 反学习:API 明确说周受限,清除之前的误判
+                if unlimitedLearnedModels.contains(model.modelName) {
+                    unlimitedLearnedModels.remove(model.modelName)
                     changed = true
                 }
             }

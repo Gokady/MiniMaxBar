@@ -112,12 +112,13 @@ struct ModelUsage: Codable, Identifiable {
     }
 
     /// 状态码转可读文字(API 文档无定义,按观察推断)
+    /// - 0 未启用 / 1 正常受限 / 2 受限已用尽 / 3 无配额(=无限)
     func statusText(_ code: Int) -> String {
         switch code {
         case 0: return "未启用"
         case 1: return "正常受限"
-        case 2: return "受限"
-        case 3: return "无配额"   // 可能是"无限"也可能是"不在套餐",由用户决定
+        case 2: return "已用尽"
+        case 3: return "无限"
         default: return "状态 \(code)"
         }
     }
