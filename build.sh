@@ -18,12 +18,29 @@ APP_NAME="MiniMaxBar"
 APP_DIR="dist/${APP_NAME}.app"
 DISPLAY_NAME="MiniMax Bar"
 
-# 优先用 Xcode 自带的 swift + macOS 26 SDK(CommandLineTools 不带)
-if [ -x "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" ]; then
+swift_supports_package() {
+    local swift_bin="$1"
+    local version
+    version="$("$swift_bin" --version 2>/dev/null | sed -n 's/.*Swift version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p' | head -1)"
+    [ -n "$version" ] || return 1
+    set -- $version
+    [ "$1" -gt 6 ] || { [ "$1" -eq 6 ] && [ "$2" -ge 2 ]; }
+}
+
+# GitHub Actions 的 setup-swift 会把目标 Swift 放到 PATH,优先尊重它。
+# 如果 PATH 上版本低于 Package.swift 要求,再回退到 Xcode 自带工具链。
+SWIFT="$(command -v swift || true)"
+if [ -n "$SWIFT" ] && ! swift_supports_package "$SWIFT"; then
+    SWIFT=""
+fi
+if [ -z "$SWIFT" ] && [ -x "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" ]; then
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
     SWIFT="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
-else
-    SWIFT="$(command -v swift)"
+fi
+
+if [ -z "$SWIFT" ]; then
+    echo "✗ 找不到 swift" >&2
+    exit 1
 fi
 
 echo "▶ Using swift: $SWIFT"
