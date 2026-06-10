@@ -1,0 +1,392 @@
+name: Manual Release
+
+# workflow_dispatch 默认 GITHUB_TOKEN 只读,需要 write 才能 gh release create
+permissions:
+  contents: write
+
+# ─── 手动发版 → GitHub Releases + Sparkle ────────────────
+#
+# 在 GitHub Actions 页面点 "Run workflow" → 输版本号 → 自动:
+#   1. 校验版本号 + 改 Info.plist
+#   2. 编译 .app + 嵌入 Sparkle.framework
+#   3. 打 MiniMaxBar.zip
+#   4. 严格验证产物(zip 顶层结构 + 版本号 + 可执行文件)
+#   5. EdDSA 签名 zip → 生成签名
+#   6. generate_appcast 生成 appcast.xml
+#   7. 创建 GitHub Release,上传 zip + appcast.xml
+#
+# 前置条件:
+#   - GitHub Secret: SPARKLE_PRIVATE_KEY (EdDSA 私钥,由 generate_keys 生成)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号,格式 X.Y.Z(例:0.5.0)'
+        required: true
+        type: string
+      release_notes:
+        description: 'Release notes(可空,空则从 CHANGELOG.md 抽对应段)'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false   # 发版严肃,别中途取消
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    env:
+      # ad-hoc 签名:用户首次打开需要右键 → 打开
+      # ⚠ 正式分发需要 Developer ID 签名 + Notarization,否则 macOS 10.15+ 会拦截
+      CODE_SIGNING_ALLOWED: NO
+      CODE_SIGN_IDENTITY: ""
+      CODE_SIGNING_REQUIRED: NO
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Swift 6.2
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.2'
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      - name: 校验输入
+        id: validate
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${VERSION}"
+          # X.Y.Z 格式校验
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ 版本号格式错: $VERSION(需要 X.Y.Z,如 0.5.0)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ 版本号: v$VERSION"
+
+      - name: 检查 SPARKLE_PRIVATE_KEY
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "${SPARKLE_PRIVATE_KEY}" ]; then
+            echo "❌ SPARKLE_PRIVATE_KEY 未配置,无法发布 Sparkle 更新"
+            exit 1
+          else
+            echo "✅ SPARKLE_PRIVATE_KEY 已配置"
+          fi
+
+      - name: 写 Info.plist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${VERSION}"
+          PLIST="Resources/Info.plist"
+
+          BUILD_NUM=$(git rev-list --count HEAD)
+          echo "Build 号: $BUILD_NUM"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :MARKETING_VERSION string $VERSION" "$PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Set :MARKETING_VERSION $VERSION" "$PLIST"
+
+          echo "✅ Info.plist:"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :MARKETING_VERSION" "$PLIST"
+
+      - name: 编译 .app bundle
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -o pipefail
+
+          echo "=== Swift 版本 ==="
+          swift --version
+
+          # 编译
+          swift build -c release 2>&1 | tee build.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "❌ 编译失败,最后 50 行:"
+            tail -50 build.log
+            exit 1
+          fi
+
+          # 拼 .app bundle
+          BIN=".build/release/MiniMaxBar"
+          APP="dist/MiniMaxBar.app"
+          rm -rf dist
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+          cp "$BIN" "$APP/Contents/MacOS/MiniMaxBar"
+          cp Resources/Info.plist "$APP/Contents/Info.plist"
+
+          # SwiftPM 产物需要补 app bundle 的 framework 搜索路径
+          if ! otool -l "$APP/Contents/MacOS/MiniMaxBar" | grep -q "@executable_path/../Frameworks"; then
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/MiniMaxBar"
+            echo "  ✓ rpath @executable_path/../Frameworks"
+          fi
+
+          # 嵌入 Sparkle.framework
+          SPARKLE_FW=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+          if [ -d "$SPARKLE_FW" ]; then
+            cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
+            echo "  ✓ Sparkle.framework"
+          else
+            echo "❌ Sparkle.framework 未找到"
+            exit 1
+          fi
+
+          if [ -f "Icons/AppIcon.icns" ]; then
+            cp "Icons/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+            echo "  ✓ AppIcon.icns"
+          fi
+          for png in "icon_22.png" "icon_22@2x.png" "icon_22@3x.png"; do
+            if [ -f "Icons/statusbar/$png" ]; then
+              cp "Icons/statusbar/$png" "$APP/Contents/Resources/$png"
+            fi
+          done
+          for png in "icon_22.png" "icon_22@2x.png" "icon_22@3x.png"; do
+            if [ -f "Icons/statusbar/color/$png" ]; then
+              mkdir -p "$APP/Contents/Resources/color"
+              cp "Icons/statusbar/color/$png" "$APP/Contents/Resources/color/$png"
+            fi
+          done
+
+          # ad-hoc 签名
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          xattr -cr "$APP" 2>/dev/null || true
+
+          echo "✅ .app bundle 完成"
+          ls -la "$APP/"
+          ls -la "$APP/Contents/Frameworks/" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          otool -l "$APP/Contents/MacOS/MiniMaxBar" | grep -A2 "@executable_path/../Frameworks"
+
+      - name: 打 MiniMaxBar.zip
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          cd dist
+
+          # ditto --keepParent 让 MiniMaxBar.app 作为 zip 顶层目录
+          ditto -c -k --sequesterRsrc --keepParent MiniMaxBar.app MiniMaxBar.zip
+          ls -la MiniMaxBar.zip
+
+          # 严格验证 zip 结构
+          echo ""
+          echo "───────── zip 结构验证 ─────────"
+          rm -rf /tmp/zip-extract
+          mkdir -p /tmp/zip-extract
+          unzip -q MiniMaxBar.zip -d /tmp/zip-extract
+
+          APP="/tmp/zip-extract/MiniMaxBar.app"
+          ERRORS=0
+
+          if [ ! -d "$APP" ]; then
+            echo "❌ 顶层不是 MiniMaxBar.app/"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ ! -f "$APP/Contents/Info.plist" ]; then
+            echo "❌ Info.plist 缺失"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ ! -f "$APP/Contents/MacOS/MiniMaxBar" ]; then
+            echo "❌ 可执行文件缺失"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ ! -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+            echo "❌ Sparkle.framework 未嵌入"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if ! otool -l "$APP/Contents/MacOS/MiniMaxBar" | grep -q "@executable_path/../Frameworks"; then
+            echo "❌ 缺少 Sparkle framework rpath"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ -f "$APP/Contents/Info.plist" ]; then
+            APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+            if [ "$APP_VERSION" != "$VERSION" ]; then
+              echo "❌ 版本号不匹配:zip 里是 $APP_VERSION,输入是 $VERSION"
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "✅ CFBundleShortVersionString: $APP_VERSION(匹配)"
+            fi
+          fi
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "❌ zip 验证失败"
+            exit 1
+          fi
+          echo "✅ zip 验证通过"
+
+      - name: EdDSA 签名 + appcast 生成
+        id: sparkle
+        env:
+          VERSION: ${{ inputs.version }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          cd dist
+
+          GENERATE_APPCAST="../.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+
+          # ─── EdDSA 签名 + appcast 生成(一步完成)───
+          echo "───────── EdDSA 签名 + appcast 生成 ─────────"
+
+          if [ ! -x "$GENERATE_APPCAST" ]; then
+            echo "❌ 找不到 generate_appcast: $GENERATE_APPCAST"
+            exit 1
+          fi
+
+          APPCAST_DIR=$(mktemp -d)
+          cp MiniMaxBar.zip "$APPCAST_DIR/"
+
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          echo "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" \
+            --ed-key-file - \
+            --download-url-prefix "$DOWNLOAD_URL" \
+            "$APPCAST_DIR"
+
+          if [ ! -f "$APPCAST_DIR/appcast.xml" ]; then
+            echo "❌ appcast.xml 未生成"
+            exit 1
+          fi
+
+          cp "$APPCAST_DIR/appcast.xml" ./appcast.xml
+          rm -rf "$APPCAST_DIR"
+
+          if grep -q "sparkle:edSignature" appcast.xml; then
+            echo "✅ appcast.xml 生成成功并包含 sparkle:edSignature"
+          else
+            echo "❌ appcast.xml 缺少 sparkle:edSignature"
+            exit 1
+          fi
+
+      - name: 打 MiniMaxBar.dmg
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+
+          STAGING="dist/dmg-staging"
+          rm -rf "$STAGING" dist/MiniMaxBar.dmg
+          mkdir -p "$STAGING"
+
+          cp -R dist/MiniMaxBar.app "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          echo "───────── 创建 DMG ─────────"
+          ls -la "$STAGING/"
+          hdiutil create -volname "MiniMaxBar" \
+                          -srcfolder "$STAGING" \
+                          -ov -format UDZO \
+                          "dist/MiniMaxBar.dmg"
+
+          hdiutil verify dist/MiniMaxBar.dmg
+          ls -la dist/MiniMaxBar.dmg
+          echo "✅ DMG 已生成:$(du -h dist/MiniMaxBar.dmg | cut -f1)"
+
+      - name: 读 release notes
+        id: notes
+        env:
+          VERSION: ${{ inputs.version }}
+          INPUT_NOTES: ${{ inputs.release_notes }}
+        run: |
+          VERSION="${VERSION}"
+
+          if [ -n "${INPUT_NOTES}" ]; then
+            NOTES="${INPUT_NOTES}"
+            echo "📝 用 workflow 输入的 notes"
+          elif [ -f CHANGELOG.md ] && grep -q "## \[${VERSION}\]" CHANGELOG.md; then
+            NOTES=$(awk -v ver="## \[${VERSION}\]" '
+              $0 ~ ver { in_section=1; print; next }
+              in_section && /^## \[/ { exit }
+              in_section { print }
+            ' CHANGELOG.md)
+            echo "📝 从 CHANGELOG.md 抽 ${VERSION} 段"
+          else
+            NOTES="Release v${VERSION}"
+            echo "📝 CHANGELOG.md 没有 ${VERSION} 段,用默认文案"
+          fi
+
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "───────── notes preview ─────────"
+          echo "$NOTES" | head -20
+
+      - name: 创建 GitHub Release(zip + appcast.xml + dmg)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${VERSION}"
+          ZIP="dist/MiniMaxBar.zip"
+          DMG="dist/MiniMaxBar.dmg"
+          APPCAST="dist/appcast.xml"
+
+          ASSETS=()
+          [ -f "$ZIP" ] && ASSETS+=("$ZIP")
+          [ -f "$APPCAST" ] && ASSETS+=("$APPCAST")
+          [ -f "$DMG" ] && ASSETS+=("$DMG")
+
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "❌ 没产物可上传"
+            exit 1
+          fi
+
+          echo "📦 准备上传 ${#ASSETS[@]} 个资产:"
+          printf '  - %s\n' "${ASSETS[@]}"
+
+          gh release create "v${VERSION}" \
+            "${ASSETS[@]}" \
+            --title "v${VERSION}" \
+            --notes "${{ steps.notes.outputs.notes }}"
+
+          echo ""
+          echo "🎉 Release v${VERSION} 已发布"
+          echo "👉 https://github.com/${{ github.repository }}/releases/tag/v${VERSION}"
+          echo ""
+          echo "📦 资产:"
+          echo "  - MiniMaxBar.zip (Sparkle 自动更新用)"
+          echo "  - appcast.xml (Sparkle feed)"
+          echo "  - MiniMaxBar.dmg (手动安装)"
+
+      - name: 上传产物(作为 workflow artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMaxBar-v${{ inputs.version }}-build
+          path: |
+            dist/MiniMaxBar.zip
+            dist/MiniMaxBar.dmg
+            dist/appcast.xml
+          if-no-files-found: error
+          retention-days: 30
