@@ -64,4 +64,4 @@ SPARKLE_PRIVATE_KEY
 
 ## License
 
-暂未声明许可证。开源前建议补充 `LICENSE` 文件。
+MIT © 2026 Goka
