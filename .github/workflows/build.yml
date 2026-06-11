@@ -6,6 +6,7 @@ name: CI Build
 # 不签名(用 CODE_SIGNING_ALLOWED=NO),等正式签名流程接好再上
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
