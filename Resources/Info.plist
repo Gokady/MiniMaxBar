@@ -37,12 +37,12 @@
 	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>SUFeedURL</key>
 	<string>https://github.com/Gokady/MiniMaxBar/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>+dR0UmVFFcXDYjjKqax2Cp7JzrmUyhqa5UqxPb7+4pg=</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<string>p3lDlci7WlYjX6JlA4C/JeOr8jZtjUVgjyIsJSOgyeI=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>
