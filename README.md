@@ -4,7 +4,7 @@ macOS 菜单栏里的 MiniMax Token Plan 额度监控工具。它会把当前套
 
 ![菜单栏额度](docs/screenshot-menu-bar.png)
 
-## 截图
+## 展示
 
 ![额度面板](docs/screenshot-popover.png)
 
@@ -55,12 +55,6 @@ open dist/MiniMaxBar.app
 ```
 
 项目使用 SwiftPM 构建。发布流程在 GitHub Actions 的 `Manual Release` workflow 中执行，会生成 `MiniMaxBar.zip`、`MiniMaxBar.dmg` 和 Sparkle `appcast.xml`。
-
-发布 Sparkle 更新需要在仓库 Secrets 中配置：
-
-```text
-SPARKLE_PRIVATE_KEY
-```
 
 ## License
 
