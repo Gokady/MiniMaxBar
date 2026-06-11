@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import SwiftUI
+import CryptoKit
 
 @MainActor
 final class UsageStore: ObservableObject {
@@ -217,10 +218,11 @@ final class UsageStore: ObservableObject {
             UserDefaults.standard.set(customPeriodText, forKey: Keys.subCustomText)
         }
     }
-    /// 学到的"无限周额度"模型(自动学习 + 持久化)
+    /// 学到的"无限周额度"模型(当前 API key 下自动学习 + 持久化)
     @Published private(set) var unlimitedLearnedModels: Set<String> = []
 
     private var timer: Timer?
+    private var weeklyUnlimitedEvidence: [String: WeeklyUnlimitedEvidence] = [:]
 
     static let shared = UsageStore()
 
@@ -236,6 +238,7 @@ final class UsageStore: ObservableObject {
         static let barColorMode = "barColorMode"
         static let statusBarIcon = "statusBarIcon"
         static let unlimitedLearned = "unlimitedLearnedModels"
+        static let weeklyUnlimitedEvidence = "weeklyUnlimitedEvidence.v1"
         static let hiddenModels = "hiddenModels"
         static let subPeriod = "subscriptionPeriod"
         static let subCustomText = "customPeriodText"
@@ -269,8 +272,9 @@ final class UsageStore: ObservableObject {
         let iconRaw = d.string(forKey: Keys.statusBarIcon) ?? StatusBarIcon.whiteSmooth.rawValue
         self.statusBarIcon = StatusBarIcon(rawValue: iconRaw) ?? .whiteSmooth
 
-        if let arr = d.array(forKey: Keys.unlimitedLearned) as? [String] {
-            self.unlimitedLearnedModels = Set(arr)
+        if let data = d.data(forKey: Keys.weeklyUnlimitedEvidence),
+           let decoded = try? JSONDecoder().decode([String: WeeklyUnlimitedEvidence].self, from: data) {
+            self.weeklyUnlimitedEvidence = decoded
         }
 
         if let arr = d.array(forKey: Keys.hiddenModels) as? [String] {
@@ -290,14 +294,23 @@ final class UsageStore: ObservableObject {
 
         let bcmRaw = d.string(forKey: Keys.barColorMode) ?? BarColorMode.stepped.rawValue
         self.barColorMode = BarColorMode(rawValue: bcmRaw) ?? .stepped
+
+        refreshUnlimitedLearnedModels()
     }
 
     // MARK: - API key
 
     var apiKeyConfigured: Bool { !(KeychainStore.load() ?? "").isEmpty }
 
-    func saveAPIKey(_ key: String) { KeychainStore.save(key) }
-    func clearAPIKey() { KeychainStore.delete() }
+    func saveAPIKey(_ key: String) {
+        KeychainStore.save(key)
+        refreshUnlimitedLearnedModels()
+    }
+
+    func clearAPIKey() {
+        KeychainStore.delete()
+        unlimitedLearnedModels = []
+    }
 
     // MARK: - 派生
 
@@ -412,6 +425,7 @@ final class UsageStore: ObservableObject {
             if model.appearsUnavailable { return false }
             // 学到的 + API 直接说无限(status != 1),但排除空占位模型
             if unlimitedLearnedModels.contains(model.modelName) { return true }
+            if model.hasEmptyWeeklyQuotaSignal { return false }
             if model.currentWeeklyStatus != 1 { return true }
             return false
         } else {
@@ -438,33 +452,147 @@ final class UsageStore: ObservableObject {
         hiddenModels.contains(name)
     }
 
-    /// 学习无限周额度模式:5h 任何使用(剩余 < 100)+ 周 100% → 记为周无限
-    /// 敏感度:5h 一掉(就触发),不必等到 60-90
+    private struct WeeklyUnlimitedEvidence: Codable {
+        var modelName: String
+        var evidenceCount: Int
+        var confirmed: Bool
+        var lastIntervalStartTime: Int64
+        var lastFiveHourUsageCount: Int64
+        var lastFiveHourRemainingPercent: Int
+        var lastWeeklyStartTime: Int64
+        var lastWeeklyUsageCount: Int64
+        var lastWeeklyRemainingPercent: Int
+        var updatedAt: TimeInterval
+    }
+
+    private static let weeklyUnlimitedEvidenceThreshold = 2
+
+    private func currentAPIKeyFingerprint() -> String? {
+        let key = KeychainStore.load() ?? ""
+        guard !key.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(key.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func evidenceStorageKey(apiKeyFingerprint: String, modelName: String) -> String {
+        "\(apiKeyFingerprint):\(modelName)"
+    }
+
+    private func makeEvidence(from model: ModelUsage, confirmed: Bool = false, evidenceCount: Int = 0) -> WeeklyUnlimitedEvidence {
+        WeeklyUnlimitedEvidence(
+            modelName: model.modelName,
+            evidenceCount: evidenceCount,
+            confirmed: confirmed,
+            lastIntervalStartTime: model.startTime,
+            lastFiveHourUsageCount: model.currentIntervalUsageCount,
+            lastFiveHourRemainingPercent: model.currentIntervalRemainingPercent,
+            lastWeeklyStartTime: model.weeklyStartTime,
+            lastWeeklyUsageCount: model.currentWeeklyUsageCount,
+            lastWeeklyRemainingPercent: model.currentWeeklyRemainingPercent,
+            updatedAt: Date().timeIntervalSince1970
+        )
+    }
+
+    private func refreshUnlimitedLearnedModels() {
+        guard let fingerprint = currentAPIKeyFingerprint() else {
+            unlimitedLearnedModels = []
+            return
+        }
+        let prefix = "\(fingerprint):"
+        unlimitedLearnedModels = Set(weeklyUnlimitedEvidence.compactMap { key, evidence in
+            key.hasPrefix(prefix) && evidence.confirmed ? evidence.modelName : nil
+        })
+    }
+
+    private func saveWeeklyUnlimitedEvidence() {
+        guard let data = try? JSONEncoder().encode(weeklyUnlimitedEvidence) else { return }
+        UserDefaults.standard.set(data, forKey: Keys.weeklyUnlimitedEvidence)
+        UserDefaults.standard.removeObject(forKey: Keys.unlimitedLearned)
+        refreshUnlimitedLearnedModels()
+    }
+
+    private func weeklyShowsRealLimit(_ model: ModelUsage) -> Bool {
+        model.currentWeeklyStatus == 1
+            && (
+                model.currentWeeklyTotalCount > 0
+                || model.currentWeeklyUsageCount > 0
+                || model.currentWeeklyRemainingPercent < 100
+            )
+    }
+
+    /// 学习无限周额度模式:
+    /// 同一 API key + 同一模型下,观察到 5h 窗口发生真实消耗,但周窗口连续不变,才推断周无限。
     /// 例外:用户手动覆盖(weeklyDisplayOverride != nil)时不学习
     func learnUnlimited() {
         // 用户已手动覆盖,不再学习
         guard weeklyDisplayOverride == nil else { return }
+        guard let fingerprint = currentAPIKeyFingerprint() else { return }
 
         var changed = false
         for model in models {
-            let fiveHour = model.currentIntervalRemainingPercent
-            let weekly = model.currentWeeklyRemainingPercent
-            // 模式:5h 有真实限制 + 5h 已用(剩余 < 100) + 周纹丝不动 100%
-            let fiveHourHasLimit = model.currentIntervalStatus == 1
-            let fiveHourHasUsage = fiveHour < 100
-            let weeklyUnchanged = weekly == 100
-            if fiveHourHasLimit && fiveHourHasUsage && weeklyUnchanged {
-                if !unlimitedLearnedModels.contains(model.modelName) {
-                    unlimitedLearnedModels.insert(model.modelName)
+            let key = evidenceStorageKey(apiKeyFingerprint: fingerprint, modelName: model.modelName)
+
+            if model.appearsUnavailable {
+                if weeklyUnlimitedEvidence.removeValue(forKey: key) != nil { changed = true }
+                continue
+            }
+
+            if weeklyShowsRealLimit(model) {
+                let replacement = makeEvidence(from: model)
+                if weeklyUnlimitedEvidence[key]?.confirmed == true || weeklyUnlimitedEvidence[key]?.evidenceCount != 0 {
                     changed = true
                 }
+                weeklyUnlimitedEvidence[key] = replacement
+                continue
             }
+
+            guard model.currentIntervalStatus == 1, !model.hasEmptyIntervalQuotaSignal else {
+                if weeklyUnlimitedEvidence[key] == nil {
+                    weeklyUnlimitedEvidence[key] = makeEvidence(from: model)
+                    changed = true
+                }
+                continue
+            }
+
+            guard var evidence = weeklyUnlimitedEvidence[key] else {
+                weeklyUnlimitedEvidence[key] = makeEvidence(from: model)
+                changed = true
+                continue
+            }
+
+            let sameIntervalWindow = evidence.lastIntervalStartTime == model.startTime
+            let sameWeeklyWindow = evidence.lastWeeklyStartTime == model.weeklyStartTime
+            let fiveHourMoved = sameIntervalWindow
+                && (
+                    model.currentIntervalUsageCount > evidence.lastFiveHourUsageCount
+                    || model.currentIntervalRemainingPercent < evidence.lastFiveHourRemainingPercent
+                )
+            let weeklyStayedFull = sameWeeklyWindow
+                && model.currentWeeklyUsageCount == evidence.lastWeeklyUsageCount
+                && model.currentWeeklyRemainingPercent == evidence.lastWeeklyRemainingPercent
+                && model.currentWeeklyRemainingPercent == 100
+
+            if fiveHourMoved && weeklyStayedFull {
+                evidence.evidenceCount = min(
+                    Self.weeklyUnlimitedEvidenceThreshold,
+                    evidence.evidenceCount + 1
+                )
+                evidence.confirmed = evidence.evidenceCount >= Self.weeklyUnlimitedEvidenceThreshold
+            }
+
+            evidence.lastIntervalStartTime = model.startTime
+            evidence.lastFiveHourUsageCount = model.currentIntervalUsageCount
+            evidence.lastFiveHourRemainingPercent = model.currentIntervalRemainingPercent
+            evidence.lastWeeklyStartTime = model.weeklyStartTime
+            evidence.lastWeeklyUsageCount = model.currentWeeklyUsageCount
+            evidence.lastWeeklyRemainingPercent = model.currentWeeklyRemainingPercent
+            evidence.updatedAt = Date().timeIntervalSince1970
+
+            weeklyUnlimitedEvidence[key] = evidence
+            changed = true
         }
         if changed {
-            UserDefaults.standard.set(
-                Array(unlimitedLearnedModels),
-                forKey: Keys.unlimitedLearned
-            )
+            saveWeeklyUnlimitedEvidence()
         }
     }
 

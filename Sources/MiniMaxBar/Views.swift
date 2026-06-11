@@ -1123,7 +1123,7 @@ struct PanelForm: View {
         switch store.weeklyDisplayOverride {
         case .some(true):  return "已强制显示为「无限」"
         case .some(false): return "已强制显示为「受限」(绿→红)"
-        case .none:       return "自动:5h 一旦使用而周不变 = 自动判定无限"
+        case .none:       return "自动:连续观察到 5h 消耗而周额度不变后推断无限"
         }
     }
 
