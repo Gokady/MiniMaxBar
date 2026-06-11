@@ -141,6 +141,13 @@ final class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        // Sparkle 在"没找到更新"时也可能走 didAbortWithError,带同样的 SUNoUpdateError。
+        // 跟 didFinishUpdateCycleFor 用同一个判断,避免 .upToDate 被覆盖成 .failed
+        // (失败文案就会变成"您使用的就是最新版本!"这种 Sparkle 本地化提示)。
+        if isNoUpdateError(error) {
+            setState(.upToDate)
+            return
+        }
         setState(.failed(reason: Self.friendlyError(error)))
     }
 

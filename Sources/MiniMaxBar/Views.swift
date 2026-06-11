@@ -1378,7 +1378,7 @@ struct UpdateForm: View {
             } header: {
                 Text("自动更新")
             } footer: {
-                Text("由 Sparkle 2 驱动,每天自动检查一次。手动下载为备用方案。")
+                Text(Self.checkIntervalFooter)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -1442,5 +1442,29 @@ struct UpdateForm: View {
         if d < 7 { return "\(d) 天前" }
         // 超过 1 周:落回绝对日期(避免长期挂着个"7 天前"误导)
         return reference.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    /// 从 Bundle.infoDictionary 读 SUScheduledCheckInterval(秒)拼成 footer
+    /// 读不到或为 0 用兜底文案(避免和 Info.plist 写死的"每天"脱节)
+    private static var checkIntervalFooter: String {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "SUScheduledCheckInterval") as? Int
+        if let seconds = raw, seconds > 0 {
+            return "由 Sparkle 2 提供更新能力；当前自动检查间隔：\(Self.formatInterval(seconds))。手动下载可作为备用方案。"
+        }
+        return "由 Sparkle 2 提供更新能力；会定期自动检查更新。手动下载可作为备用方案。"
+    }
+
+    private static func formatInterval(_ seconds: Int) -> String {
+        if seconds < 60 { return "每 \(seconds) 秒" }
+        if seconds < 3600 {
+            let m = seconds / 60
+            return "每 \(m) 分钟"
+        }
+        if seconds < 86400 {
+            let h = seconds / 3600
+            return "每 \(h) 小时"
+        }
+        let d = seconds / 86400
+        return "每 \(d) 天"
     }
 }
