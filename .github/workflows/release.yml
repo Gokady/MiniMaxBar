@@ -395,7 +395,7 @@ jobs:
               CHANGES="- Build from commit $(git rev-parse --short HEAD)"
             fi
 
-            NOTES=$(printf '## What'\''s Changed\n\n%s\n\n## Assets\n\n- `MiniMaxBar.dmg`: manual installation package.\n- `MiniMaxBar.zip`: Sparkle auto-update archive.\n- `appcast.xml`: Sparkle update feed.\n' "$CHANGES")
+            NOTES=$(printf '## What'\''s Changed\n\n%s\n\n## Assets\n\n- MiniMaxBar.dmg: manual installation package.\n- MiniMaxBar.zip: Sparkle auto-update archive.\n- appcast.xml: Sparkle update feed.\n' "$CHANGES")
             echo "📝 自动根据 git log 生成 release notes"
           fi
 
