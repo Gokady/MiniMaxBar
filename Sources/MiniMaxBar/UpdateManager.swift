@@ -43,10 +43,14 @@ final class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
         controller?.updater.canCheckForUpdates ?? false
     }
 
-    /// 自动检查是否启用
+    /// 自动检查是否启用(双向可写,UI 改完会回写到 Sparkle)
     var automaticallyChecksForUpdates: Bool {
         get { controller?.updater.automaticallyChecksForUpdates ?? false }
-        set { controller?.updater.automaticallyChecksForUpdates = newValue }
+        set {
+            guard let controller, controller.updater.automaticallyChecksForUpdates != newValue else { return }
+            controller.updater.automaticallyChecksForUpdates = newValue
+            objectWillChange.send()
+        }
     }
 
     /// 检查间隔(秒)
@@ -141,11 +145,30 @@ final class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
-        if let error {
+        // 关键:Sparkle 在「没有可用更新」时会回 SUNoUpdateError,SUI 的处理方式是先回调
+        // updaterDidNotFindUpdate(_:error:)(已置为 .upToDate),再走这里。如果不识别错误码,
+        // .upToDate 会被这条回调覆盖成 .failed,UI 就会出现「失败:您使用的就是最新版本!」。
+        if let error, !isNoUpdateError(error) {
             setState(.failed(reason: Self.friendlyError(error)))
-        } else if case .checking = state {
+            return
+        }
+        // 走到这里 = 真的是「没找到更新」或「成功」。
+        // 如果 updaterDidNotFindUpdate 已经先置过 .upToDate,这里就不动;否则把 .checking 收尾。
+        if case .checking = state {
             setState(.upToDate)
         }
+    }
+
+    /// 识别 Sparkle 的「没找到更新」信号(不同 API 路径都会回这个错误)
+    /// 错误码直接用数字 1001(SUNoUpdateError),避免依赖 Sparkle 头文件导出
+    /// SUSparkleErrorDomain 同理("SUSparkleErrorDomain")
+    private func isNoUpdateError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == "SUSparkleErrorDomain",
+           nsError.code == 1001 {
+            return true
+        }
+        return false
     }
 
     private static func friendlyError(_ error: Error) -> String {
@@ -171,11 +194,11 @@ extension UpdateManager.State {
         switch self {
         case .idle:                 return "未检查"
         case .checking:             return "正在检查…"
-        case .upToDate:             return "已是最新"
+        case .upToDate:             return "已是最新版本"
         case .available(let v, _):  return "v\(v) 可用"
         case .downloading:          return "下载中…"
         case .installing:           return "安装中…"
-        case .failed(let r):        return "失败:\(r)"
+        case .failed(let r):        return r
         }
     }
 

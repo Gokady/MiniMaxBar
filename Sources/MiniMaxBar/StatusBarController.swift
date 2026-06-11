@@ -22,6 +22,7 @@ final class StatusBarController: NSObject {
         configurePopover()
         configureContextMenu()
         observeStore()
+        observeUpdateManager()
         observePopoverCommands()
     }
 
@@ -52,21 +53,27 @@ final class StatusBarController: NSObject {
         statusItem.length = 90
     }
 
-    /// 根据 store.statusBarIcon 设置按钮图标
+    /// 根据 store.statusBarIcon 设置按钮图标(如有可用更新会自动盖一个红点)
     private func applyIconToButton(_ button: NSStatusBarButton) {
         let choice = store.statusBarIcon
-        if let img = loadIcon(for: choice) {
-            // 先置空再赋值,避免 NSStatusBarButton 缓存旧 image
-            // —— 修 macOS 26 上"切换单色/彩色图标错位"bug
-            button.image = nil
-            img.isTemplate = choice.isTemplate
-            button.image = img
-            button.imageScaling = .scaleProportionallyDown
-            button.needsDisplay = true
-        } else {
-            button.image = NSImage(systemSymbolName: "chart.bar.doc.horizontal",
-                                    accessibilityDescription: "MiniMax Usage")
-        }
+        let baseImage: NSImage = loadIcon(for: choice) ?? NSImage(
+            systemSymbolName: "chart.bar.doc.horizontal",
+            accessibilityDescription: "MiniMax Usage"
+        ) ?? NSImage()
+        // 先置空再赋值,避免 NSStatusBarButton 缓存旧 image
+        // —— 修 macOS 26 上"切换单色/彩色图标错位"bug
+        button.image = nil
+        let hasUpdate: Bool = {
+            if case .available = UpdateManager.shared.state { return true }
+            return false
+        }()
+        let finalImage: NSImage = hasUpdate
+            ? Self.attachUpdateBadge(to: baseImage)
+            : baseImage
+        finalImage.isTemplate = choice.isTemplate
+        button.image = finalImage
+        button.imageScaling = .scaleProportionallyDown
+        button.needsDisplay = true
     }
 
     /// 加载图标(品牌 PNG 或 SF Symbol)
@@ -88,6 +95,30 @@ final class StatusBarController: NSObject {
             }
         }
         return nil
+    }
+
+    /// 在图标左上角贴一个白点(@3x 直径 ~13pt,不抢戏的轻量提示)
+    /// 圆心距上/左各 1.5 × radius,留出 0.5 × radius 的呼吸空间
+    /// 走 template 渲染:深色菜单栏下白,浅色菜单栏下黑(对比度恒定)
+    private static func attachUpdateBadge(to base: NSImage) -> NSImage {
+        let size = base.size
+        let badgeRadius: CGFloat = max(2, size.height * 0.10)
+        let centerInset = badgeRadius * 1.5
+        let badgeCenter = NSPoint(x: centerInset, y: size.height - centerInset)
+        let out = NSImage(size: size)
+        out.lockFocus()
+        defer { out.unlockFocus() }
+        base.draw(in: NSRect(origin: .zero, size: size))
+        NSColor.white.setFill()
+        NSBezierPath(
+            ovalIn: NSRect(
+                x: badgeCenter.x - badgeRadius,
+                y: badgeCenter.y - badgeRadius,
+                width: badgeRadius * 2,
+                height: badgeRadius * 2
+            )
+        ).fill()
+        return out
     }
 
     /// 订阅 store 的关键状态,变化时刷新状态栏文字
@@ -127,6 +158,18 @@ final class StatusBarController: NSObject {
         guard let button = statusItem.button else { return }
         button.title = store.statusBarText
         updateStatusItemLength()
+    }
+
+    /// 订阅 UpdateManager 的 state,「有可用更新」时给菜单栏图标盖一个小红点
+    private func observeUpdateManager() {
+        UpdateManager.shared.$state
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self = self, let btn = self.statusItem.button else { return }
+                    self.applyIconToButton(btn)
+                }
+            }
+            .store(in: &cancellables)
     }
 
     /// 动态调整 status item 宽度,根据图标 + 文字内容计算
