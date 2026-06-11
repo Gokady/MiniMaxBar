@@ -311,7 +311,10 @@ jobs:
           APPCAST_DIR=$(mktemp -d)
           cp MiniMaxBar.zip "$APPCAST_DIR/"
 
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          # Sparkle appends the archive filename to this prefix. Keep the
+          # trailing slash, otherwise the tag path component is treated like a
+          # filename and the generated enclosure URL loses /vX.Y.Z/.
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/"
           echo "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" \
             --ed-key-file - \
             --download-url-prefix "$DOWNLOAD_URL" \
