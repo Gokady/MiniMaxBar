@@ -1,4 +1,4 @@
-name: Manual Release
+name: Release
 
 # workflow_dispatch 默认 GITHUB_TOKEN 只读,需要 write 才能 gh release create
 permissions:
@@ -6,7 +6,7 @@ permissions:
 
 # ─── 发版 → GitHub Releases + Sparkle ───────────────────
 #
-# 推送 v* tag 或在 GitHub Actions 页面点 "Run workflow" → 输版本号 → 自动:
+# CI Build 成功 / 推送 v* tag / 在 GitHub Actions 页面点 "Run workflow" → 自动:
 #   1. 校验版本号 + 改 Info.plist
 #   2. 编译 .app + 嵌入 Sparkle.framework
 #   3. 打 MiniMaxBar.zip
@@ -18,6 +18,10 @@ permissions:
 #   - SPARKLE_PRIVATE_KEY (EdDSA 私钥,由 generate_keys 生成)
 
 on:
+  workflow_run:
+    workflows: ['CI Build']
+    types: [completed]
+    branches: [main]
   push:
     tags:
       - 'v*'
@@ -42,6 +46,15 @@ jobs:
     name: Build & Release
     runs-on: macos-latest
     timeout-minutes: 30
+    if: >-
+      ${{
+        github.event_name != 'workflow_run' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main'
+        )
+      }}
 
     env:
       # ad-hoc 签名:用户首次打开需要右键 → 打开
@@ -55,6 +68,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref_name }}
 
       - name: Setup Swift 6.2
         uses: swift-actions/setup-swift@v2
@@ -77,11 +91,31 @@ jobs:
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
           REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${INPUT_VERSION}"
           if [ -z "$VERSION" ]; then
-            VERSION="${REF_NAME#v}"
+            if [ "$EVENT_NAME" = "workflow_run" ]; then
+              LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+              if [[ "$LATEST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                BASE="${LATEST_TAG#v}"
+              else
+                BASE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+              fi
+
+              IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+              while gh release view "v${VERSION}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "v${VERSION}" >/dev/null 2>&1; do
+                PATCH=$((PATCH + 1))
+                VERSION="${MAJOR}.${MINOR}.${PATCH}"
+              done
+            else
+              VERSION="${REF_NAME#v}"
+            fi
           fi
+
           # X.Y.Z 格式校验
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "❌ 版本号格式错: $VERSION(需要 X.Y.Z,如 0.5.0)"

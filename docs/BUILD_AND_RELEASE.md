@@ -1,8 +1,8 @@
 # Build and Release Guide
 
-This repo has two separate automation paths. Do not mix them up.
+This repo has two release paths. Do not mix them up.
 
-## 1. Normal Push: CI Build Only
+## 1. Normal Push: CI Then Auto Release
 
 Every push to `main` runs `.github/workflows/build.yml`.
 
@@ -22,14 +22,24 @@ It uploads an Actions artifact named like:
 MiniMaxBar-app-<commit-sha>
 ```
 
-This artifact is only for CI inspection. It is not a GitHub Release and does
-not appear on the Releases page.
+After `CI Build` succeeds on a direct `main` push, `.github/workflows/release.yml`
+runs automatically through `workflow_run`.
 
-## 2. Version Tag: Public Release
+The release workflow:
 
-Only a `v*` tag creates a GitHub Release.
+- finds the latest GitHub Release tag
+- increments the patch version, for example `v0.1.0` -> `v0.1.1`
+- writes `CFBundleShortVersionString` and `CFBundleVersion` into
+  `Resources/Info.plist` inside the build workspace
+- builds `MiniMaxBar.zip`, `MiniMaxBar.dmg`, and `appcast.xml`
+- publishes them to GitHub Releases
 
-Use this flow for a public build:
+This means the Releases page, manual downloads, and Sparkle updates are linked
+after every successful `main` push.
+
+## 2. Version Tag Or Manual Release
+
+Use this flow when you need an exact version instead of the automatic patch bump:
 
 ```bash
 git status --short --branch
@@ -37,7 +47,8 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-The tag triggers `.github/workflows/release.yml`.
+The tag triggers `.github/workflows/release.yml` and publishes that exact
+version. You can also run the `Release` workflow manually and provide a version.
 
 It creates:
 
@@ -98,7 +109,7 @@ open dist/MiniMaxBar.app
 After pushing a tag, watch the release workflow:
 
 ```bash
-gh run list --repo Gokady/MiniMaxBar --workflow "Manual Release" --limit 5
+gh run list --repo Gokady/MiniMaxBar --workflow "Release" --limit 5
 gh run watch <run-id> --repo Gokady/MiniMaxBar --exit-status
 ```
 
@@ -119,8 +130,8 @@ appcast.xml
 
 ## 6. Common Pitfalls
 
-- A normal push to `main` will not create a Release. Push a `v*` tag.
-- If Releases is empty, check whether a version tag exists on origin.
+- A normal push to `main` creates a Release only after `CI Build` succeeds.
+- If Releases is empty, check the `CI Build` run first, then the `Release` run.
 - If `appcast.xml` is missing, check `SPARKLE_PRIVATE_KEY`.
 - If Sparkle says it cannot fetch update info, check that the latest Release
   contains `appcast.xml`.
