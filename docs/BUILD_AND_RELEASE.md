@@ -121,6 +121,16 @@ appcast.xml
 `MiniMaxBar.zip` is used by Sparkle. `MiniMaxBar.dmg` is for manual install.
 `appcast.xml` is the Sparkle feed.
 
+Release notes are generated in this priority order:
+
+1. `release_notes` input from manual `workflow_dispatch`
+2. matching `CHANGELOG.md` section, such as `## [0.1.4]`
+3. automatic git log from the previous GitHub Release tag to `HEAD`
+
+Editing the GitHub Release description after publishing is safe. It changes only
+the Releases page text and does not rebuild zip/dmg/appcast or change the
+Sparkle signature.
+
 Manual run:
 
 ```bash
@@ -267,6 +277,12 @@ After any release, run:
 ```bash
 gh release view --repo Gokady/MiniMaxBar --json tagName,name,url,assets,publishedAt,isDraft,isPrerelease
 curl -sL https://github.com/Gokady/MiniMaxBar/releases/latest/download/appcast.xml | sed -n '1,40p'
+```
+
+To update only the release notes for an already published version:
+
+```bash
+gh release edit v0.1.3 --repo Gokady/MiniMaxBar --notes-file /path/to/notes.md
 ```
 
 Expected release assets:

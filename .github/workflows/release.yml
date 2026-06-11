@@ -94,12 +94,12 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          PREVIOUS_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
           VERSION="${INPUT_VERSION}"
           if [ -z "$VERSION" ]; then
             if [ "$EVENT_NAME" = "workflow_run" ]; then
-              LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
-              if [[ "$LATEST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                BASE="${LATEST_TAG#v}"
+              if [[ "$PREVIOUS_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                BASE="${PREVIOUS_TAG#v}"
               else
                 BASE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
               fi
@@ -122,7 +122,13 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$PREVIOUS_TAG" >> "$GITHUB_OUTPUT"
           echo "✅ 版本号: v$VERSION"
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "✅ 上一个 Release: $PREVIOUS_TAG"
+          else
+            echo "ℹ 未找到上一个 Release"
+          fi
 
       - name: 检查 SPARKLE_PRIVATE_KEY
         id: sparkle_key
@@ -363,6 +369,7 @@ jobs:
         id: notes
         env:
           VERSION: ${{ steps.validate.outputs.version }}
+          PREVIOUS_TAG: ${{ steps.validate.outputs.previous_tag }}
           INPUT_NOTES: ${{ github.event.inputs.release_notes }}
         run: |
           VERSION="${VERSION}"
@@ -378,8 +385,18 @@ jobs:
             ' CHANGELOG.md)
             echo "📝 从 CHANGELOG.md 抽 ${VERSION} 段"
           else
-            NOTES="Release v${VERSION}"
-            echo "📝 CHANGELOG.md 没有 ${VERSION} 段,用默认文案"
+            RANGE="HEAD"
+            if [ -n "${PREVIOUS_TAG}" ] && git rev-parse --verify "${PREVIOUS_TAG}^{commit}" >/dev/null 2>&1; then
+              RANGE="${PREVIOUS_TAG}..HEAD"
+            fi
+
+            CHANGES=$(git log --no-merges --pretty=format:'- %s (%h)' "$RANGE" | head -30 || true)
+            if [ -z "$CHANGES" ]; then
+              CHANGES="- Build from commit $(git rev-parse --short HEAD)"
+            fi
+
+            NOTES=$(printf '## What'\''s Changed\n\n%s\n\n## Assets\n\n- `MiniMaxBar.dmg`: manual installation package.\n- `MiniMaxBar.zip`: Sparkle auto-update archive.\n- `appcast.xml`: Sparkle update feed.\n' "$CHANGES")
+            echo "📝 自动根据 git log 生成 release notes"
           fi
 
           echo "notes<<EOF" >> "$GITHUB_OUTPUT"
