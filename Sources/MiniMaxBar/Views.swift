@@ -1295,92 +1295,115 @@ struct AdvancedForm: View {
 
 struct UpdateForm: View {
     @EnvironmentObject var update: UpdateManager
+    /// 1 分钟一次的「心跳」——驱动"上次检查"和"状态"等时间敏感字段重新渲染
+    /// 上次检查本身用自定义格式(不显示秒),定时器只更新一次/分钟,不会"按秒刷新"
+    @State private var now: Date = Date()
+    private let tick = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Section {
-            // 当前版本
-            HStack {
-                Text("当前版本")
-                Spacer()
-                Text(AppInfo.fullVersionString)
-                    .foregroundStyle(.secondary)
-                    .monospaced()
-            }
-
-            // 自动更新状态
-            HStack {
-                Text("自动更新")
-                Spacer()
-                if update.isReady {
-                    Text(update.automaticallyChecksForUpdates ? "已启用" : "已禁用")
-                        .foregroundStyle(update.automaticallyChecksForUpdates ? .green : .secondary)
-                } else {
-                    Text("未初始化")
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            // 状态行
-            HStack(spacing: 6) {
-                statusIcon
-                Text(update.state.description)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            // 最新版本(有更新时显示)
-            if let latest = update.latestVersion {
+        Group {
+            Section {
+                // 当前版本
                 HStack {
-                    Text("最新版本")
+                    Text("当前版本")
                     Spacer()
-                    Text("v\(latest)")
-                        .foregroundStyle(.green)
+                    Text(AppInfo.fullVersionString)
+                        .foregroundStyle(.secondary)
                         .monospaced()
                 }
-            }
 
-            // 上次检查时间
-            if let last = update.lastCheckDate {
-                HStack {
-                    Text("上次检查")
+                // 自动更新开关 —— UI 直接双向绑定 Sparkle 的 automaticallyChecksForUpdates
+                if update.isReady {
+                    Toggle("自动检查更新", isOn: Binding(
+                        get: { update.automaticallyChecksForUpdates },
+                        set: { update.automaticallyChecksForUpdates = $0 }
+                    ))
+                } else {
+                    HStack {
+                        Text("自动更新")
+                        Spacer()
+                        Text("未初始化")
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                // 状态行
+                HStack(spacing: 6) {
+                    statusIcon
+                    Text(update.state.description)
+                        .foregroundStyle(statusForeground)
                     Spacer()
-                    Text(last, style: .relative)
-                        .foregroundStyle(.tertiary)
                 }
+
+                // 最新版本(有更新时显示)
+                if let latest = update.latestVersion {
+                    HStack {
+                        Text("最新版本")
+                        Spacer()
+                        Text("v\(latest)")
+                            .foregroundStyle(.blue)
+                            .monospaced()
+                    }
+                }
+
+                // 上次检查时间 —— 走自定义格式,不带秒
+                if let last = update.lastCheckDate {
+                    HStack {
+                        Text("上次检查")
+                        Spacer()
+                        Text(relativeCheckText(reference: last, now: now))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                }
+
+                // 按钮
+                HStack {
+                    Button {
+                        update.checkForUpdates()
+                    } label: {
+                        Label("立即检查", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!update.canCheckForUpdates || update.state.isBusy)
+
+                    Spacer()
+
+                    Button {
+                        update.openReleasesPage()
+                    } label: {
+                        Label("手动下载", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } header: {
+                Text("自动更新")
+            } footer: {
+                Text("由 Sparkle 2 驱动,每天自动检查一次。手动下载为备用方案。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
 
-            // 按钮
-            HStack {
-                Button("检查更新") {
-                    update.checkForUpdates()
+            // 更新日志
+            if let notes = update.releaseNotes, !notes.isEmpty {
+                Section("更新内容") {
+                    Text(notes)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .disabled(!update.canCheckForUpdates || update.state.isBusy)
-
-                Spacer()
-
-                Button {
-                    update.openReleasesPage()
-                } label: {
-                    Label("手动下载", systemImage: "arrow.down.circle")
-                }
-                .buttonStyle(.bordered)
             }
-        } header: {
-            Text("自动更新")
-        } footer: {
-            Text("由 Sparkle 2 驱动,每天自动检查一次。手动下载为备用方案。")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
         }
+        // 隐藏的 1 分钟心跳,触发 now 刷新
+        .onReceive(tick) { now = $0 }
+    }
 
-        // 更新日志
-        if let notes = update.releaseNotes, !notes.isEmpty {
-            Section("更新内容") {
-                Text(notes)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+    /// 状态行的前景色:失败红、可用蓝、最新绿、其余次要
+    private var statusForeground: Color {
+        switch update.state {
+        case .failed:     return .red
+        case .available:  return .blue
+        case .upToDate:   return .green
+        default:          return .secondary
         }
     }
 
@@ -1404,5 +1427,20 @@ struct UpdateForm: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
         }
+    }
+
+    /// 自定义"X 时间前"格式,精度只到分钟/小时/天,不会显示秒
+    private func relativeCheckText(reference: Date, now: Date) -> String {
+        let interval = now.timeIntervalSince(reference)
+        if interval < 0 { return "刚刚" }
+        if interval < 60 { return "刚刚" }
+        let m = Int(interval / 60)
+        if m < 60 { return "\(m) 分钟前" }
+        let h = m / 60
+        if h < 24 { return "\(h) 小时前" }
+        let d = h / 24
+        if d < 7 { return "\(d) 天前" }
+        // 超过 1 周:落回绝对日期(避免长期挂着个"7 天前"误导)
+        return reference.formatted(date: .abbreviated, time: .omitted)
     }
 }
