@@ -306,12 +306,14 @@ final class UsageStore: ObservableObject {
         (usage?.modelRemains ?? []).sorted { $0.modelName < $1.modelName }
     }
 
-    /// 可见模型(5h 和 周 都 0% → 没权限,不展示;手动隐藏的也不展示)
+    /// 可见模型(空窗口/没权限/手动隐藏的不展示)
     var visibleModels: [ModelUsage] {
         models.filter { model in
             // 1. 用户手动隐藏的模型
             if hiddenModels.contains(model.modelName) { return false }
-            // 2. 5h 和 周 都 0% + 都是受限状态 → 没权限
+            // 2. API 防护/套餐外占位模型:两个窗口都只有空信号
+            if model.appearsUnavailable { return false }
+            // 3. 5h 和 周 都 0% + 都是受限状态 → 没权限
             let intervalNoAccess = model.currentIntervalStatus == 1
                 && model.currentIntervalRemainingPercent == 0
             let weeklyNoAccess = model.currentWeeklyStatus == 1
@@ -324,32 +326,39 @@ final class UsageStore: ObservableObject {
     var statusBarPercent: Int? {
         switch displayMode {
         case .minPercent:
-            let ps = models.map { $0.currentIntervalRemainingPercent }
+            let ps = visibleModels.map { $0.currentIntervalRemainingPercent }
             return ps.min()
         case .tracked:
-            return models.first(where: { $0.modelName == trackedModelName })?
+            return visibleModels.first(where: { $0.modelName == trackedModelName })?
                 .currentIntervalRemainingPercent
         case .iconOnly:
             return nil
         }
     }
 
-    /// 全部可见模型的 5h 是否都无限(status != 1)
+    /// 全部可见模型的 5h 是否都无限
     private var all5hUnlimited: Bool {
-        !models.isEmpty && models.allSatisfy { $0.currentIntervalStatus != 1 }
+        let visible = visibleModels
+        return !visible.isEmpty && visible.allSatisfy {
+            isUnlimited($0, isWeekly: false)
+        }
     }
 
     /// 全部可见模型的周是否都无限
     private var allWeeklyUnlimited: Bool {
-        !models.isEmpty && models.allSatisfy { $0.currentWeeklyStatus != 1 }
+        let visible = visibleModels
+        return !visible.isEmpty && visible.allSatisfy {
+            isUnlimited($0, isWeekly: true)
+        }
     }
 
     /// 状态栏文字(图标后面直接显示,由 statusBarFormat 控制)
     /// ⚠ 只有 status != 1 才算真无限,percent==100 ≠ 无限(可能是"满"而已)
     var statusBarText: String {
-        guard apiKeyConfigured, !models.isEmpty else { return "" }
-        let min5h   = models.map { $0.currentIntervalRemainingPercent }.min() ?? 100
-        let minWkly = models.map { $0.currentWeeklyRemainingPercent }.min() ?? 100
+        let visible = visibleModels
+        guard apiKeyConfigured, !visible.isEmpty else { return "" }
+        let min5h   = visible.map { $0.currentIntervalRemainingPercent }.min() ?? 100
+        let minWkly = visible.map { $0.currentWeeklyRemainingPercent }.min() ?? 100
         let fiveUnlimited = all5hUnlimited
         let weekUnlimited = allWeeklyUnlimited
 
@@ -400,12 +409,14 @@ final class UsageStore: ObservableObject {
         if isWeekly {
             // 用户手动覆盖
             if let ovr = weeklyDisplayOverride { return ovr }
-            // 学到的 + API 直接说无限(status != 1)
+            if model.appearsUnavailable { return false }
+            // 学到的 + API 直接说无限(status != 1),但排除空占位模型
             if unlimitedLearnedModels.contains(model.modelName) { return true }
             if model.currentWeeklyStatus != 1 { return true }
             return false
         } else {
-            // 5h 窗口只信任 API status
+            // 5h 窗口只信任 API status,但空窗口信号不是无限
+            if model.hasEmptyIntervalQuotaSignal { return false }
             return model.currentIntervalStatus != 1
         }
     }

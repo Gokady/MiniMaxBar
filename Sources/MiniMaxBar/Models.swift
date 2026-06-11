@@ -99,6 +99,27 @@ struct ModelUsage: Codable, Identifiable {
     var fiveHourFraction: Double { max(0, min(1, Double(currentIntervalRemainingPercent) / 100)) }
     var weeklyFraction:   Double { max(0, min(1, Double(currentWeeklyRemainingPercent) / 100)) }
 
+    /// API 会用 status=3 + total/usage=0 + remaining=100 表示一个"空窗口"。
+    /// 对未开通/防护类模型(如 video)这不是无限额度,不能直接按 status != 1 显示无限。
+    var hasEmptyIntervalQuotaSignal: Bool {
+        currentIntervalStatus == 3
+            && currentIntervalTotalCount == 0
+            && currentIntervalUsageCount == 0
+            && currentIntervalRemainingPercent == 100
+    }
+
+    var hasEmptyWeeklyQuotaSignal: Bool {
+        currentWeeklyStatus == 3
+            && currentWeeklyTotalCount == 0
+            && currentWeeklyUsageCount == 0
+            && currentWeeklyRemainingPercent == 100
+    }
+
+    /// 5h 和周额度都只有空信号时,通常是套餐外/防护占位模型,不应展示为无限。
+    var appearsUnavailable: Bool {
+        hasEmptyIntervalQuotaSignal && hasEmptyWeeklyQuotaSignal
+    }
+
     /// 模型显示名(给 UI 用,目前只是首字母大写)
     var displayName: String {
         switch modelName.lowercased() {
@@ -117,7 +138,7 @@ struct ModelUsage: Codable, Identifiable {
         case 0: return "未启用"
         case 1: return "正常受限"
         case 2: return "受限"
-        case 3: return "无配额"   // 可能是"无限"也可能是"不在套餐",由用户决定
+        case 3: return "空/无限"   // 需要结合 total/usage 和另一个窗口判断
         default: return "状态 \(code)"
         }
     }
